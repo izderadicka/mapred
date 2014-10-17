@@ -1,0 +1,9 @@
+compil_mode//_build/controller.byte=byte-code
+compil_mode//_build/protocol.byte=byte-code
+compil_mode//_build/tests/test_protocol.byte=byte-code
+compil_mode//_build/worker.byte=byte-code
+compil_mode/controller.byte=byte-code
+compil_mode/protocol.byte=byte-code
+compil_mode/test_protocol.byte=byte-code
+compil_mode/worker.byte=byte-code
+eclipse.preferences.version=1

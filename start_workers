@@ -1,0 +1,11 @@
+#!/bin/bash
+START=8990
+NO=$1
+if [ -e $NO ] 
+then
+NO=10
+fi
+for ((i=$START;i<$START+$NO;++i)) 
+do 
+./worker.byte -port $i &
+done

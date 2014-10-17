@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section name="OcamlProjectSettings">
+	<section name="OcamlbuildSettings">
+		<item value="" key="ocamlbuildProjectLinkerFlags"/>
+		<item value="" key="ocamlbuildProjectLibs"/>
+		<item value="-use-ocamlfind -classic-display -syntax camlp4o -pkg core,core_bench,str,camomile,async -pkg uri,cohttp.async,textwrap,yojson -pkg sexplib.syntax,comparelib.syntax,fieldslib.syntax,variantslib.syntax -pkg bin_prot.syntax -tag thread -tag debug -tag annot -tag bin_annot -tag short_paths -cflags &quot;-w A-4-33-40-41-42-43-34-44&quot; -cflags -strict-sequence -use-menhir -X natdet -yaccflag --explain" key="ocamlbuildProjectOtherFlags"/>
+		<item value="" key="ocamlbuildProjectCompilerFlags"/>
+		<item value="true" key="ocamlbuildGenerateTypeInfo"/>
+		<item value="test_protocol.byte,controller.byte,worker.byte,dummy_c.cma" key="ocamlbuildProjectTargets"/>
+	</section>
+</section>
