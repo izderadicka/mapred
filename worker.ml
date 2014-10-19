@@ -1,6 +1,19 @@
 open Core.Std
 open Async.Std
 open Protocol
+open Fce
+
+let mapper = ref None
+let get_mapper () = 
+match !mapper with
+| Some m -> m
+| None -> failwith "Mapper is not initialized"
+
+let set_mapper _path = 
+let module M = Mapper(Dummy_m.M) in
+mapper:= Some(module M:IMapper)
+
+
 
 let write_response w resp =
 	Writer.write_sexp w (Response.sexp_of_t resp);
@@ -20,10 +33,17 @@ let start_server port =
 				| Ping -> 
 					printf "\nController Ping on %d" port;
 					write_response w (Response.Pong port)
-				| Init (Worker_type.Mapper, path) ->
+				| Init  path ->
+					set_mapper "";
 					printf "\nInitializing Mapper %d from %s"  port path;
-					write_response w (Response.Ready Worker_type.Mapper)
+					write_response w Response.Ready
+				| Map (key, data) ->
+					printf "\nRequest for mapping for key %s on %d" key port;
+					let module M = (val get_mapper (): IMapper) in
+					let res = M.map key data in
+					write_response w (Response.Map (key,res))
 				| _ -> failwith "Not Implemented"
+				
 				end
 			|`Eof -> return ()
 		))

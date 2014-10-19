@@ -8,4 +8,5 @@ fi
 for ((i=$START;i<$START+$NO;++i)) 
 do 
 ./worker.byte -port $i &
+echo "Started $i"
 done

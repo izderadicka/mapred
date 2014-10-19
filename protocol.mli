@@ -22,19 +22,11 @@ module Worker_announce :
     
   end 
 	
-(** Specification of worker *)
-module Worker_type :
-  sig
-		(** Mapper or Reducer worker *)
-    type t = Mapper  | Reducer  with sexp
-    
-  end 
-	
 (** Requests from controller *)	
 module Request :
   sig
     type t =
-        Init of Worker_type.t  * string (** prepares worker - load code from path specified in second param *)
+        Init of  string (** prepares worker - load code from path specified *)
       | Finish  (** terminates worker *)
       | Map of string * Data.t
       | Reduce of string * Data.t list
@@ -45,7 +37,7 @@ module Request :
 module Response :
   sig
     type t =
-			| Ready of Worker_type.t
+			| Ready 
       | Term of int
       | Error of string
       | Pong of int

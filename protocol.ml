@@ -18,12 +18,12 @@ module Worker_type = struct
 end
 
 module Request = struct
-	type t = Init of Worker_type.t * string| Finish | Map of string * Data.t | Reduce of string * (Data.t list)| Ping
+	type t = Init of string| Finish | Map of string * Data.t | Reduce of string * (Data.t list)| Ping
 	with sexp 
 end 
 
 module Response = struct
-	type t = | Ready of Worker_type.t
+	type t = | Ready 
       | Term of int | Error of string | Pong of int| Map of string * (string * Data.t) list 
 	| Reduce of string * (Data.t list) with sexp
 	

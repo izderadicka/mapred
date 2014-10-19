@@ -16,9 +16,9 @@ let ctl = ref None
 
 let available_workers = Host_and_port.Table.create ()
 let free_workers_reader, free_workers_writer = Pipe.create ()
-let mapper_workers_reader, mapper_workers_writer = Pipe.create ()
+let ready_workers_reader, ready_workers_writer = Pipe.create ()
 
-let sent_map_pieces = String.Hash_set.create ()
+let sent_pieces = String.Hash_set.create ()
 let map_results = String.Table.create ()
 
 let start port =
@@ -80,6 +80,13 @@ let req_resp ?on_error worker_addr req process_resp =
 			| Some handler -> handler exn
 			| None -> printf "Ignored error for request %s : %s" (Sexp.to_string (Request.sexp_of_t req)) (Exn.to_string exn)
 
+
+let req_resp_no_wait ?on_error worker_addr req process_resp =
+match on_error with
+	| Some s -> Deferred.don't_wait_for (req_resp ~on_error:s worker_addr req process_resp)
+	|None -> Deferred.don't_wait_for (req_resp worker_addr req process_resp)
+	
+
 let ping_workers () =
 	
 	Hashtbl.iter available_workers
@@ -110,28 +117,24 @@ let update_worker_status w status =
 			true
 	| None -> false
 
-let rec init_workers () =
+let rec init_workers  worker_param =
 	Pipe.read free_workers_reader
-	>>= (function
+	>>=(function
 		| `Ok w ->
-				req_resp
+			  
+				req_resp_no_wait
 					~on_error: (fun e -> printf "\nError while initilizing worker %s : \n%s " (Host_and_port.to_string w) (Exn.to_string e))
 					w
-					(Request.Init (Worker_type.Mapper, "reader"))
+					(Request.Init worker_param)
 					( fun resp ->
 								match resp with
-								| Ready t -> if t = Worker_type.Mapper then
-											(
-												printf "Mapper %s is ready" (Host_and_port.to_string w);
-												
+								| Ready  -> 
+												printf "\nMapper %s is ready" (Host_and_port.to_string w);
 												if update_worker_status w Initialized_mapper then
-													ignore (Pipe.write mapper_workers_writer w)
-												
-											)
-										else printf "Invalid reply to init from worker %s, worker type mismatch" (Host_and_port.to_string w)
-								| _ -> printf "Invalid reply to init from worker %s" (Host_and_port.to_string w)
+													ignore (Pipe.write ready_workers_writer w)
+								| _ -> printf "\nInvalid reply to init from worker %s" (Host_and_port.to_string w)
 					)
-				>>= (fun () -> init_workers ())
+					; init_workers  worker_param
 		
 		| `Eof -> return ()
 	)
@@ -141,58 +144,96 @@ let get_ctl () =
 	| Some m -> m
 	| None -> failwith "No controller module loaded"
 
-let do_mapping () =
-	let ctl = get_ctl () in
-	let rec map piece () =
-		Pipe.read mapper_workers_reader
+let max_retries = ref 3
+
+let do_tasks name next_piece process_data () =
+	let rec do_task piece attempt =
+		Pipe.read ready_workers_reader
 		>>= function
 		| `Ok w ->
-				let send (k, v) =
-					if Hashtbl.mem map_results k then
-						return ()
+				let send req =
+					let k = match req with
+					| Request.Map (k,_) -> k
+					| Request.Reduce(k,__) -> k
+					| _ -> failwith "Invalid request type"
+					in
+					if Hashtbl.mem map_results k then ()
 					else
 						begin
-							Hash_set.add sent_map_pieces k;
+							Hash_set.add sent_pieces k;
 							ignore(update_worker_status w Working);
-							req_resp w (Request.Map (k, v)) ( fun resp ->
+							printf "\nSending piece %s for %s to %s" k name (Host_and_port.to_string w);
+							req_resp_no_wait 
+							 ~on_error: (fun exn ->
+								if attempt >= !max_retries then failwith (sprintf "\nReached max retries for mapping piece %s, error:\n%s"
+									k (Exn.to_string exn))
+								else
+									printf "\nRetrying %s piece %s due to this error:\n%s" name k (Exn.to_string exn);
+									Deferred.don't_wait_for (do_task piece (attempt +1))
+								)
+								w 
+								req 
+								( fun resp ->
+									let return_worker () = 
+										if update_worker_status w Initialized_mapper then
+														ignore (Pipe.write ready_workers_writer w); (* return back to queue *)
+										in
+										let remove_sent key = 
+										 Hash_set.remove sent_pieces key;
+													printf "\nReceived %s for piece %s from %s" name key (Host_and_port.to_string w) 
+											in
 											match resp with
-											
-											| Map (key, data) ->
-											
-													if update_worker_status w Initialized_mapper then
-														ignore (Pipe.write mapper_workers_writer w); (* return back to queue *)
-													
-													if not (Hashtbl.mem map_results key) then
-														ignore (Hashtbl.add map_results ~key ~data);
-														
-													Hash_set.remove sent_map_pieces key;
-											
+											| Map _ | Reduce _ ->
+												
+												return_worker ();
+												let key = process_data resp in
+												 remove_sent key;
+											   			
 											| _ -> failwith "Invalid response type"
 								)
 						end
 				in
 				begin
 					match piece with
-					| Some piece -> send piece >>= map None
+					| Some piece -> send piece ; do_task None attempt
 					| None ->
-							let module C = (val ctl: Ifc.Controlling) in
-							match C.next_piece () with
-							| Some p -> send p >>= map None
+							match next_piece () with
+							| Some p -> send p ;  do_task None 0
 							| None -> return ()
 				end
 		
-		|`Eof -> return ()
+		|`Eof -> failwith "Mapping workers queue is closed, cannot continue"
 	
-	in map None ()
+	in do_task None 0 
 
+
+let next_mapping_piece () = 
+let module C = (val (get_ctl ()): Ifc.Controlling) in
+	match C.next_piece () with
+	| Some (k,v) -> Some (Request.Map (k,v))
+	| None -> None
+	
+let process_mapping_data resp =
+	match resp with
+	| Response.Map (key,data) ->
+	if not (Hashtbl.mem map_results key) then
+			ignore (Hashtbl.add map_results ~key ~data); 
+	key
+	| _ -> assert false
+	
 let run port =
 	ctl:= Some (module Dummy_c.M: Ifc.Controlling);
 	start port
 	>>| (fun _s -> printf "\nController is running on port %d" port)
+	(* use for debuging *)
+	(*
 	>>| (fun () -> Deferred.forever () (fun () ->
 								after (Time.Span.create ~sec: 10 ())
 								>>| ping_workers ))
-	>>= init_workers
+	*)
+	>>| (fun () -> init_workers  "path"  >>> ident )
+	>>= do_tasks "mapping" next_mapping_piece process_mapping_data
+	>>| (fun () -> printf "\nAll Mapping sent")
 	>>= never
 
 let cmd =

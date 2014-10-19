@@ -1,6 +1,6 @@
 open Protocol
 open Core.Std
-open Interfaces
+
 
 let  range n = 
 let rec range n l =
@@ -17,13 +17,16 @@ module M : Ifc.Controlling =
 	struct
 let next_piece () = 
 match !vals with 
-| hd::tl -> vals := tl; Some (Int.to_string hd, Data.S (Int.to_string hd))
+| hd::tl -> vals := tl; 
+printf "\nReading piece %d" hd;
+Some (Int.to_string hd, Data.S (Int.to_string hd))
 | [] -> None
 
 
 
 
 let combine res = 
+ printf "\nCombining results";
  let tbl = String.Table.create () in
  let rec add l =
 	match l with 
