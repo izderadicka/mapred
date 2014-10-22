@@ -1,5 +1,6 @@
 open Protocol
 open Core.Std
+open Async.Std
 
 
 let  range n = 
@@ -15,6 +16,13 @@ let vals = ref (range 10)
 
 module M : Ifc.Controlling =
 	struct
+		
+let init s =
+	match s with 
+	|Some s -> let count = Int.t_of_sexp s in
+	   vals := (range count)
+	|None -> ()
+	
 let next_piece () = 
 match !vals with 
 | hd::tl -> vals := tl; 

@@ -1,7 +1,10 @@
 open Protocol
+open Core.Std
 
 module type Controlling =
 	sig
+		
+val init: Sexp.t option-> unit
 (** gets one key to be mapped, None if there are no more input data *)
 val next_piece: unit -> (string * Data.t) option
 

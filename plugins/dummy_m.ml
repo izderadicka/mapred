@@ -3,6 +3,7 @@ open Protocol
 open Core.Std
 open Async.Std
 
+let () = Random.self_init ()
 
 module M: Ifc.Mapping =
 	struct
@@ -17,9 +18,12 @@ module M: Ifc.Mapping =
 			Data.S (Int.to_string v)
 			
 		let map cnv key data =
-			printf "\nMapping key %s" key;
+			
 			sleep 1;
+			if (Random.float 1.0) <= 0.2 then ( printf "\nRandomly failing mapping for key %s" key; failwith "Mapping failure")
+			else
+			printf "\nMapping key %s" key;
 			let tag = if data mod 2 =1 then "odd" else "even" in
-			[("sum", (cnv data))]
+			[(tag, (cnv data))]
 		
 	end
