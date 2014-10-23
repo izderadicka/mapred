@@ -20,11 +20,13 @@ module M: Ifc.Mapping =
 		let map cnv key data =
 			
 			sleep 1;
-			if (Random.float 1.0) <= 0.2 then 
+			(* if key = "5" then ( printf "\Systematically failing mapping for key %s" key; failwith "Mapping failure") *)
+			if (Random.float 1.0) <= 0.2 then
 			begin
+				
 				if (Random.float 1.0) <= 0.2 then
-					(printf "\nRandomly ending worker for key %s" key; 
-					Core.Std.printf "\nRandomly ending worker for key %s" key; 
+					(printf "\nRandomly ending worker for key %s" key;
+					Core.Std.printf "\nRandomly ending worker for key %s" key;
 					Caml.exit 1)
 				else
 				( printf "\nRandomly failing mapping for key %s" key; failwith "Mapping failure")

@@ -145,17 +145,8 @@ let get_ctl () =
 
 let max_retries = ref 3
 
-let debug_sent k =
-	match String.Hash_queue.mem sent_pieces k with
-	| true -> printf "\nDEBUG: Is in sent"
-	| false -> printf "\nDEBUG: Not  in sent"
-
-let do_tasks name next_piece process_data () =
-	let rec do_task () =
-		let get_worker () =
-			Pipe.read ready_workers_reader
-		in
-		let send' req worker =
+let  do_task ?(attempt=0) name piece process_data =
+		let send req worker =
 			match worker with
 			| `Ok w ->
 					let k = match req with
@@ -178,7 +169,7 @@ let do_tasks name next_piece process_data () =
 						begin
 							
 							ignore (String.Hash_queue.remove sent_pieces k);
-							ignore (String.Hash_queue.enqueue sent_pieces k (req, Time.now (), (1)));
+							ignore (String.Hash_queue.enqueue sent_pieces k (req, Time.now (), attempt));
 							ignore (update_worker_status w Working);
 							printf "\nSending piece %s for %s to %s" k name (Host_and_port.to_string w);
 							req_resp_no_wait
@@ -210,14 +201,14 @@ let do_tasks name next_piece process_data () =
 			|`Eof -> failwith "Mapping workers queue is closed, cannot continue"
 		
 		in
-		let send piece =
-			get_worker () >>| send' piece
-		in
+		Pipe.read ready_workers_reader >>| send piece
+		
+let rec do_tasks name next_piece process_data () =
 		match next_piece () with
-		| Some p -> send p >>= do_task
+		| Some p -> do_task name p process_data >>= do_tasks name next_piece process_data
 		| None -> printf "\nNo more pieces to read"; return ()
 	
-	in do_task ()
+
 
 let next_mapping_piece () =
 	let module C = (val (get_ctl ()): Ifc.Controlling) in
@@ -248,16 +239,11 @@ let rec wait_finish for_name process_result () =
 							| _ -> assert false
 						in
 						if att >= !max_retries then
-							failwith (sprintf "Reached max retries for mapping piece %s, error" key)
+							failwith (sprintf "Reached max retries %d for %s piece %s, error" !max_retries for_name key)
 						else
-							let pc = ref (Some resent) in
-							let next_piece () =
-								match !pc with
-								| Some s -> pc:= None; Some s
-								| None -> None
-							in
-							printf "\nResend piece %s from %s attempt %d" key (Time.to_string sent_time) att;
-							do_tasks for_name next_piece process_result ()
+							
+							printf "\nResend piece %s from %s attempt %d" key (Time.to_string sent_time) (att+1);
+							do_task ~attempt:(att+1) for_name resent process_result 
 							>>= wait_finish for_name process_result
 				| None -> return ()
 			else
