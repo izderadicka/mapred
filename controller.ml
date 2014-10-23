@@ -145,44 +145,47 @@ let get_ctl () =
 
 let max_retries = ref 3
 
+let debug_sent k =
+	match String.Hash_queue.mem sent_pieces k with
+	| true -> printf "\nDEBUG: Is in sent"
+	| false -> printf "\nDEBUG: Not  in sent"
+
 let do_tasks name next_piece process_data () =
 	let rec do_task () =
 		let get_worker () =
-			printf "\nDEBUG: Waiting for worker";
 			Pipe.read ready_workers_reader
 		in
 		let send' req worker =
 			match worker with
 			| `Ok w ->
-					printf "\nDEBUG: Got worker";
 					let k = match req with
 						| Request.Map (k, _) -> k
-						| Request.Reduce(k, __) -> k
+						| Request.Reduce(k, _) -> k
 						| _ -> failwith "Invalid request type"
+					in
+					let return_worker () =
+						if update_worker_status w Initialized then
+							ignore (Pipe.write ready_workers_writer w); (* return back to queue *)
+					in
+					let remove_sent key =
+						ignore (String.Hash_queue.remove sent_pieces key);
+						printf "\nReceived %s for piece %s from %s" name key (Host_and_port.to_string w)
 					in
 					if Hashtbl.mem map_results k then (
 						ignore (String.Hash_queue.remove sent_pieces k);
-						ignore (Pipe.write ready_workers_writer w))
+						return_worker () )
 					else
 						begin
-							match String.Hash_queue.lookup sent_pieces k with
-							| Some (_, _, attempt) ->
-								ignore (String.Hash_queue.remove sent_pieces k);
-								ignore (String.Hash_queue.enqueue sent_pieces k (req, Time.now (), (attempt+1)))
-							| None -> ignore (String.Hash_queue.enqueue sent_pieces k (req, Time.now (), 0));
-							ignore(update_worker_status w Working);
+							
+							ignore (String.Hash_queue.remove sent_pieces k);
+							ignore (String.Hash_queue.enqueue sent_pieces k (req, Time.now (), (1)));
+							ignore (update_worker_status w Working);
 							printf "\nSending piece %s for %s to %s" k name (Host_and_port.to_string w);
-							let return_worker () =
-								if update_worker_status w Initialized then
-									ignore (Pipe.write ready_workers_writer w); (* return back to queue *)
-							in
-							let remove_sent key =
-								ignore (String.Hash_queue.remove sent_pieces key);
-								printf "\nReceived %s for piece %s from %s" name key (Host_and_port.to_string w)
-							in
 							req_resp_no_wait
-								~on_error: (fun _exn ->
-									(* TODO: consider more specific approach per exn type? *)
+								~on_error: (fun exn ->
+									(* TODO: consider more specific approach per exn     *)
+									(* type?                                             *)
+											printf "\nException while %s piece %s:\n%s" name k (Exn.to_string exn);
 											return_worker ();
 									
 								)
@@ -237,7 +240,6 @@ let rec wait_finish for_name process_result () =
 	| Some (_, last_time, _) ->
 			let wait_period = Time.diff (Time.now ()) last_time in
 			if Time.Span.(wait_period >= wait_for_task) then
-				
 				match String.Hash_queue.dequeue sent_pieces with
 				| Some (resent, sent_time, att) ->
 						let key = match resent with
@@ -245,7 +247,7 @@ let rec wait_finish for_name process_result () =
 							| Reduce(k, _) -> k
 							| _ -> assert false
 						in
-						if att >= !max_retries  then
+						if att >= !max_retries then
 							failwith (sprintf "Reached max retries for mapping piece %s, error" key)
 						else
 							let pc = ref (Some resent) in
@@ -254,7 +256,7 @@ let rec wait_finish for_name process_result () =
 								| Some s -> pc:= None; Some s
 								| None -> None
 							in
-							printf "\nResend piece %s from %s" key (Time.to_string sent_time);
+							printf "\nResend piece %s from %s attempt %d" key (Time.to_string sent_time) att;
 							do_tasks for_name next_piece process_result ()
 							>>= wait_finish for_name process_result
 				| None -> return ()
