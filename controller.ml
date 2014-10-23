@@ -12,7 +12,7 @@ type worker_remote =
 		mutable status : worker_status
 	}
 
-type task = Request.t * Time.t
+type task = Request.t * Time.t * int
 
 let ctl = ref None
 
@@ -20,7 +20,7 @@ let available_workers = Host_and_port.Table.create ()
 let free_workers_reader, free_workers_writer = Pipe.create ()
 let ready_workers_reader, ready_workers_writer = Pipe.create ()
 
-let sent_pieces = String.Hash_queue.create ()
+let sent_pieces : task String.Hash_queue.t = String.Hash_queue.create ()
 let map_results = String.Table.create ()
 
 let start port =
@@ -146,13 +146,13 @@ let get_ctl () =
 let max_retries = ref 3
 
 let do_tasks name next_piece process_data () =
-	let rec do_task piece attempt ()=
+	let rec do_task () =
 		let get_worker () =
 			printf "\nDEBUG: Waiting for worker";
 			Pipe.read ready_workers_reader
 		in
-		let send' req worker = 
-		  match worker with
+		let send' req worker =
+			match worker with
 			| `Ok w ->
 					printf "\nDEBUG: Got worker";
 					let k = match req with
@@ -165,35 +165,41 @@ let do_tasks name next_piece process_data () =
 						ignore (Pipe.write ready_workers_writer w))
 					else
 						begin
-							ignore (String.Hash_queue.remove sent_pieces k);
-							ignore (String.Hash_queue.enqueue sent_pieces k (req, Time.now ()));
+							match String.Hash_queue.lookup sent_pieces k with
+							| Some (_, _, attempt) ->
+								ignore (String.Hash_queue.remove sent_pieces k);
+								ignore (String.Hash_queue.enqueue sent_pieces k (req, Time.now (), (attempt+1)))
+							| None -> ignore (String.Hash_queue.enqueue sent_pieces k (req, Time.now (), 0));
 							ignore(update_worker_status w Working);
 							printf "\nSending piece %s for %s to %s" k name (Host_and_port.to_string w);
+							let return_worker () =
+								if update_worker_status w Initialized then
+									ignore (Pipe.write ready_workers_writer w); (* return back to queue *)
+							in
+							let remove_sent key =
+								ignore (String.Hash_queue.remove sent_pieces key);
+								printf "\nReceived %s for piece %s from %s" name key (Host_and_port.to_string w)
+							in
 							req_resp_no_wait
-								~on_error: (fun exn ->
-											if attempt >= !max_retries then failwith (sprintf "\nReached max retries for mapping piece %s, error:\n%s"
-															k (Exn.to_string exn))
-											else
-												printf "\nRetrying %s piece %s due to this error:\n%s" name k (Exn.to_string exn);
-											Deferred.don't_wait_for (do_task piece (attempt +1) ())
+								~on_error: (fun _exn ->
+									(* TODO: consider more specific approach per exn type? *)
+											return_worker ();
+									
 								)
 								w
 								req
 								( fun resp ->
-											let return_worker () =
-												if update_worker_status w Initialized then
-													ignore (Pipe.write ready_workers_writer w); (* return back to queue *)
-											in
-											let remove_sent key =
-												ignore (String.Hash_queue.remove sent_pieces key);
-												printf "\nReceived %s for piece %s from %s" name key (Host_and_port.to_string w)
-											in
+									
 											match resp with
 											| Map _ | Reduce _ ->
 											
 													return_worker ();
 													let key = process_data resp in
 													remove_sent key;
+											
+											| Error msg ->
+													printf "\nError in remote task for piece %s:\n%s" k msg;
+													return_worker ();
 											
 											| _ -> failwith "Invalid response type"
 								)
@@ -204,14 +210,11 @@ let do_tasks name next_piece process_data () =
 		let send piece =
 			get_worker () >>| send' piece
 		in
-		match piece with
-		| Some piece -> send piece >>= do_task None attempt
-		| None ->
-				match next_piece () with
-				| Some p -> send p >>= do_task None 0
-				| None -> printf "\nNo more pieces to read"; return ()
+		match next_piece () with
+		| Some p -> send p >>= do_task
+		| None -> printf "\nNo more pieces to read"; return ()
 	
-	in do_task None 0 ()
+	in do_task ()
 
 let next_mapping_piece () =
 	let module C = (val (get_ctl ()): Ifc.Controlling) in
@@ -230,38 +233,36 @@ let process_mapping_data resp =
 let wait_for_task = Time.Span.of_sec 5.0
 
 let rec wait_finish for_name process_result () =
-	if String.Hash_queue.length sent_pieces > 0 then
-		match String.Hash_queue.first sent_pieces with
-		| Some (_, last_time) ->
-				let open Time in
-				let wait_period = diff (now ()) last_time in
-				if Span.(wait_period >= wait_for_task) then
-					
-					match String.Hash_queue.dequeue sent_pieces with
-					| Some (resent, sent_time) ->
+	match String.Hash_queue.first sent_pieces with
+	| Some (_, last_time, _) ->
+			let wait_period = Time.diff (Time.now ()) last_time in
+			if Time.Span.(wait_period >= wait_for_task) then
+				
+				match String.Hash_queue.dequeue sent_pieces with
+				| Some (resent, sent_time, att) ->
+						let key = match resent with
+							| Map (k, _) -> k
+							| Reduce(k, _) -> k
+							| _ -> assert false
+						in
+						if att >= !max_retries  then
+							failwith (sprintf "Reached max retries for mapping piece %s, error" key)
+						else
 							let pc = ref (Some resent) in
 							let next_piece () =
 								match !pc with
 								| Some s -> pc:= None; Some s
 								| None -> None
 							in
-							let key = match resent with
-								| Map (k, _) -> k
-								| Reduce(k, _) -> k
-								| _ -> assert false
-							in
 							printf "\nResend piece %s from %s" key (Time.to_string sent_time);
 							do_tasks for_name next_piece process_result ()
 							>>= wait_finish for_name process_result
-					| None -> return ()
-				else
-					let to_wait = Span.( wait_for_task - wait_period) in
-					printf "\nWaiting for %s" (Span.to_string to_wait);
-					after (to_wait) >>= wait_finish for_name process_result
-		| None -> return ()
-	else ( printf "\nFinished %s" for_name;
-		return ()
-	)
+				| None -> return ()
+			else
+				let to_wait = Time.Span.( wait_for_task - wait_period) in
+				printf "\nWaiting for %s" (Time.Span.to_string to_wait);
+				after (to_wait) >>= wait_finish for_name process_result
+	| None -> printf "\nFinished %s" for_name; return ()
 
 let run port task params =
 	ctl:= Some (module Dummy_c.M: Ifc.Controlling);
