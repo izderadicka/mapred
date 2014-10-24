@@ -62,5 +62,9 @@ let rec print = function
 in
 print res
 
-
 end
+
+(* register itself with controller *)
+let () =
+	Controller_plug.set_ctl (module M : Ifc.Controlling);
+	printf "\nInitialized plugin dummy"

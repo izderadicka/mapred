@@ -2,21 +2,22 @@ open Core.Std
 open Async.Std
 open Protocol
 open Fce
+open Worker_plug
 
-let mapper = ref None
-let get_mapper () =
-	match !mapper with
-	| Some m -> m
-	| None -> failwith "Mapper is not initialized"
 
-let set_mapper _path =
-	let module M = Mapper(Dummy_m.M) in
-	mapper:= Some(module M: IMapper)
+
+let load_mapper path =
+	let fname = Filename.concat path "mapred.cmo" in
+	Plugin.load fname
 
 let write_response w resp =
 	Writer.write_sexp w (Response.sexp_of_t resp);
 	Writer.flushed w
-
+	
+let mapper () = 
+ let module M = (val get_mapper():Ifc.Mapping) in
+   (module Fce.Mapper(M): Fce.IMapper)
+	
 let start_server port =
 	Tcp.Server.create
 		~on_handler_error: `Raise
@@ -32,13 +33,15 @@ let start_server port =
 													printf "\nController Ping on %d" port;
 													write_response w (Response.Pong port)
 											| Init path ->
-													set_mapper path;
+													load_mapper path
+													>>= (fun () ->
+													ignore ( mapper () );
 													printf "\nInitializing Mapper %d from %s" port path;
-													write_response w Response.Ready
+													write_response w Response.Ready)
 											| Map (key, data) ->
 													begin
 														printf "\nRequest for mapping for key %s on %d" key port;
-														let module M = (val get_mapper (): IMapper) in
+														let module M = (val mapper (): IMapper) in
 														try
 															let res = M.map key data
 															in

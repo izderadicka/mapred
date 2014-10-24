@@ -2,3 +2,4 @@
 /usr/lib/ocaml
 tests
 plugins
+plugins/dummy

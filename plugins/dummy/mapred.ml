@@ -2,8 +2,7 @@ let sleep = Unix.sleep
 open Protocol
 open Core.Std
 open Async.Std
-
-let () = Random.self_init ()
+open Worker_plug
 
 module M: Ifc.Mapping =
 	struct
@@ -37,3 +36,8 @@ module M: Ifc.Mapping =
 			[(tag, (cnv data))]
 		
 	end
+	
+	
+let () = 
+   Random.self_init ();
+	 set_mapper (module M: Ifc.Mapping)

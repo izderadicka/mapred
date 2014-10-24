@@ -1,8 +1,7 @@
 open Core.Std
-
 open Async.Std
-
 open Protocol
+open Controller_plug
 
 type worker_status =
 	| Ready | Initialized | Working | Dead
@@ -14,8 +13,6 @@ type worker_remote =
 
 type task = Request.t * Time.t * int
 
-let ctl = ref None
-
 let available_workers = Host_and_port.Table.create ()
 let free_workers_reader, free_workers_writer = Pipe.create ()
 let ready_workers_reader, ready_workers_writer = Pipe.create ()
@@ -23,7 +20,7 @@ let ready_workers_reader, ready_workers_writer = Pipe.create ()
 let sent_pieces : task String.Hash_queue.t = String.Hash_queue.create ()
 let map_results = String.Table.create ()
 
-let start port =
+let start port () =
 	Tcp.Server.create ~on_handler_error: `Raise (Tcp.on_port port)
 		(fun addr r _w ->
 					(Reader.read_sexp r) >>=
@@ -138,77 +135,71 @@ let rec init_workers worker_param =
 		| `Eof -> return ()
 	)
 
-let get_ctl () =
-	match !ctl with
-	| Some m -> m
-	| None -> failwith "No controller module loaded"
+
 
 let max_retries = ref 3
 
-let  do_task ?(attempt=0) name piece process_data =
-		let send req worker =
-			match worker with
-			| `Ok w ->
-					let k = match req with
-						| Request.Map (k, _) -> k
-						| Request.Reduce(k, _) -> k
-						| _ -> failwith "Invalid request type"
-					in
-					let return_worker () =
-						if update_worker_status w Initialized then
-							ignore (Pipe.write ready_workers_writer w); (* return back to queue *)
-					in
-					let remove_sent key =
-						ignore (String.Hash_queue.remove sent_pieces key);
-						printf "\nReceived %s for piece %s from %s" name key (Host_and_port.to_string w)
-					in
-					if Hashtbl.mem map_results k then (
+let do_task ?(attempt =0) name piece process_data =
+	let send req worker =
+		match worker with
+		| `Ok w ->
+				let k = match req with
+					| Request.Map (k, _) -> k
+					| Request.Reduce(k, _) -> k
+					| _ -> failwith "Invalid request type"
+				in
+				let return_worker () =
+					if update_worker_status w Initialized then
+						ignore (Pipe.write ready_workers_writer w); (* return back to queue *)
+				in
+				let remove_sent key =
+					ignore (String.Hash_queue.remove sent_pieces key);
+					printf "\nReceived %s for piece %s from %s" name key (Host_and_port.to_string w)
+				in
+				if Hashtbl.mem map_results k then (
+					ignore (String.Hash_queue.remove sent_pieces k);
+					return_worker () )
+				else
+					begin
+						
 						ignore (String.Hash_queue.remove sent_pieces k);
-						return_worker () )
-					else
-						begin
-							
-							ignore (String.Hash_queue.remove sent_pieces k);
-							ignore (String.Hash_queue.enqueue sent_pieces k (req, Time.now (), attempt));
-							ignore (update_worker_status w Working);
-							printf "\nSending piece %s for %s to %s" k name (Host_and_port.to_string w);
-							req_resp_no_wait
-								~on_error: (fun exn ->
-									(* TODO: consider more specific approach per exn     *)
-									(* type?                                             *)
-											printf "\nException while %s piece %s:\n%s" name k (Exn.to_string exn);
-											return_worker ();
-									
-								)
-								w
-								req
-								( fun resp ->
-									
-											match resp with
-											| Map _ | Reduce _ ->
-											
-													return_worker ();
-													let key = process_data resp in
-													remove_sent key;
-											
-											| Error msg ->
-													printf "\nError in remote task for piece %s:\n%s" k msg;
-													return_worker ();
-											
-											| _ -> failwith "Invalid response type"
-								)
-						end
-			|`Eof -> failwith "Mapping workers queue is closed, cannot continue"
-		
-		in
-		Pipe.read ready_workers_reader >>| send piece
-		
-let rec do_tasks name next_piece process_data () =
-		match next_piece () with
-		| Some p -> do_task name p process_data >>= do_tasks name next_piece process_data
-		| None -> printf "\nNo more pieces to read"; return ()
+						ignore (String.Hash_queue.enqueue sent_pieces k (req, Time.now (), attempt));
+						ignore (update_worker_status w Working);
+						printf "\nSending piece %s for %s to %s" k name (Host_and_port.to_string w);
+						req_resp_no_wait
+							~on_error: (fun exn ->
+								(* TODO: consider more specific approach per exn type? *)
+										printf "\nException while %s piece %s:\n%s" name k (Exn.to_string exn);
+										return_worker ();
+								
+							)
+							w
+							req
+							( fun resp ->
+								
+										match resp with
+										| Map _ | Reduce _ ->
+										
+												return_worker ();
+												let key = process_data resp in
+												remove_sent key;
+										
+										| Error msg ->
+												printf "\nError in remote task for piece %s:\n%s" k msg;
+												return_worker ();
+										
+										| _ -> failwith "Invalid response type"
+							)
+					end
+		|`Eof -> failwith "Mapping workers queue is closed, cannot continue"
 	
+	in
+	Pipe.read ready_workers_reader >>| send piece
 
+let rec do_tasks name next_piece process_data () =
+	match next_piece () with
+	| Some p -> do_task name p process_data >>= do_tasks name next_piece process_data
+	| None -> printf "\nNo more pieces to read"; return ()
 
 let next_mapping_piece () =
 	let module C = (val (get_ctl ()): Ifc.Controlling) in
@@ -242,9 +233,9 @@ let rec wait_finish for_name process_result () =
 							failwith (sprintf "Reached max retries %d for %s piece %s, error" !max_retries for_name key)
 						else
 							
-							printf "\nResend piece %s from %s attempt %d" key (Time.to_string sent_time) (att+1);
-							do_task ~attempt:(att+1) for_name resent process_result 
-							>>= wait_finish for_name process_result
+							printf "\nResend piece %s from %s attempt %d" key (Time.to_string sent_time) (att +1);
+						do_task ~attempt: (att +1) for_name resent process_result
+						>>= wait_finish for_name process_result
 				| None -> return ()
 			else
 				let to_wait = Time.Span.( wait_for_task - wait_period) in
@@ -252,11 +243,18 @@ let rec wait_finish for_name process_result () =
 				after (to_wait) >>= wait_finish for_name process_result
 	| None -> printf "\nFinished %s" for_name; return ()
 
+let init_ctl path =
+	let fname = Filename.concat path "ctl.cmo" in
+	Plugin.load fname	
+	>>| (fun () ->		printf "\nPlugin form file %s loaded" fname)
+
+
 let run port task params =
-	ctl:= Some (module Dummy_c.M: Ifc.Controlling);
-	let module C = (val get_ctl (): Ifc.Controlling) in
-	C.init params;
-	start port
+	init_ctl task
+	>>| ( fun () ->
+				let module C = (val get_ctl (): Ifc.Controlling) in
+				C.init params )
+	>>= start port
 	>>| (fun _s -> printf "\nController is running on port %d" port)
 	(* use for debuging >>| (fun () -> Deferred.forever () (fun () -> after  *)
 	(* (Time.Span.create ~sec: 10 ()) >>| ping_workers ))                    *)
