@@ -42,6 +42,6 @@ module Response :
       | Error of string
       | Pong of int
       | Map of string * (string * Data.t) list
-      | Reduce of string * Data.t list
+      | Reduce of string * Data.t
       with sexp
   end 

@@ -39,28 +39,19 @@ let combine res =
  let rec add l =
 	match l with 
 	| (key,v)::t ->  ( match Hashtbl.find tbl key with
-		| Some ev -> Hashtbl.replace tbl ~key ~data: (v @ ev); add t
-		| None -> ignore (Hashtbl.add tbl ~key ~data:v) ; add t
+		| Some ev -> Hashtbl.replace tbl ~key ~data: (v :: ev); add t
+		| None -> ignore (Hashtbl.add tbl ~key ~data:[v]) ; add t
 		)
 	|[] -> ()
  
-	in add res;
+	in Hashtbl.iter res ~f: (fun ~key ~data -> ignore key; add data);
 	Hashtbl.to_alist tbl	
 
-let process_results (key, res)  = 
-printf "\nResult for %s" key;
-let rec print = function
-	| [] -> ()
-	| e :: t -> 
-	 let sep = match t with 
-			| [] -> ", "
-			| _ -> ""
-	 in
-	 match e with
-	| Data.S s -> printf "%s%s" s sep; print t
-	| (Data.File {path;_}) -> printf "File:%s%s" path sep;  print t
-in
-print res
+let process_result (key, res)  = 
+let res =  match res with
+	| Data.S s -> s
+	| (Data.File {path;_}) -> sprintf "File:%s" path
+	in printf "\nResult for %s is %s" key res
 
 end
 

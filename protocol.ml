@@ -25,6 +25,6 @@ end
 module Response = struct
 	type t = | Ready 
       | Term of int | Error of string | Pong of int| Map of string * (string * Data.t) list 
-	| Reduce of string * (Data.t list) with sexp
+	| Reduce of string * Data.t with sexp
 	
 end

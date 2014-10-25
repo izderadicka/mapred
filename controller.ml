@@ -19,6 +19,7 @@ let ready_workers_reader, ready_workers_writer = Pipe.create ()
 
 let sent_pieces : task String.Hash_queue.t = String.Hash_queue.create ()
 let map_results = String.Table.create ()
+let reduce_results = String.Table.create ()
 
 let start port () =
 	Tcp.Server.create ~on_handler_error: `Raise (Tcp.on_port port)
@@ -139,7 +140,7 @@ let rec init_workers worker_param =
 
 let max_retries = ref 3
 
-let do_task ?(attempt =0) name piece process_data =
+let do_task ?(attempt =0) name piece process_data got_result=
 	let send req worker =
 		match worker with
 		| `Ok w ->
@@ -156,7 +157,7 @@ let do_task ?(attempt =0) name piece process_data =
 					ignore (String.Hash_queue.remove sent_pieces key);
 					printf "\nReceived %s for piece %s from %s" name key (Host_and_port.to_string w)
 				in
-				if Hashtbl.mem map_results k then (
+				if got_result k then (
 					ignore (String.Hash_queue.remove sent_pieces k);
 					return_worker () )
 				else
@@ -196,9 +197,9 @@ let do_task ?(attempt =0) name piece process_data =
 	in
 	Pipe.read ready_workers_reader >>| send piece
 
-let rec do_tasks name next_piece process_data () =
+let rec do_tasks name next_piece process_data got_result () =
 	match next_piece () with
-	| Some p -> do_task name p process_data >>= do_tasks name next_piece process_data
+	| Some p -> do_task name p process_data  got_result>>= do_tasks name next_piece process_data got_result
 	| None -> printf "\nNo more pieces to read"; return ()
 
 let next_mapping_piece () =
@@ -214,10 +215,27 @@ let process_mapping_data resp =
 				ignore (Hashtbl.add map_results ~key ~data);
 			key
 	| _ -> assert false
+	
+	
+let next_reducing_piece l =
+	let data = ref l in
+	let  next () = 
+	match !data with 
+	|[] -> None
+	|(k,d)::tl ->  data:= tl; Some (Request.Reduce (k,d))
+	in next
+	
+let process_reducing_data resp =
+	match resp with 
+	| Response.Reduce (key,data)  ->
+		ignore (Hashtbl.add reduce_results ~key ~data);
+		let module C = (val get_ctl () : Ifc.Controlling) in
+		C.process_result (key,data); key
+	| _ -> assert false
 
-let wait_for_task = Time.Span.of_sec 5.0
 
-let rec wait_finish for_name process_result () =
+
+let rec wait_finish for_name process_result got_result wait_for_task () =
 	match String.Hash_queue.first sent_pieces with
 	| Some (_, last_time, _) ->
 			let wait_period = Time.diff (Time.now ()) last_time in
@@ -234,13 +252,13 @@ let rec wait_finish for_name process_result () =
 						else
 							
 							printf "\nResend piece %s from %s attempt %d" key (Time.to_string sent_time) (att +1);
-						do_task ~attempt: (att +1) for_name resent process_result
-						>>= wait_finish for_name process_result
+						do_task ~attempt: (att +1) for_name resent process_result got_result
+						>>= wait_finish for_name process_result got_result wait_for_task
 				| None -> return ()
 			else
 				let to_wait = Time.Span.( wait_for_task - wait_period) in
 				printf "\nWaiting for %s" (Time.Span.to_string to_wait);
-				after (to_wait) >>= wait_finish for_name process_result
+				after (to_wait) >>= wait_finish for_name process_result got_result wait_for_task
 	| None -> printf "\nFinished %s" for_name; return ()
 
 let init_ctl path =
@@ -249,7 +267,9 @@ let init_ctl path =
 	>>| (fun () ->		printf "\nPlugin form file %s loaded" fname)
 
 
-let run port task params =
+let run port task params wait ()=
+	let wait_for_task = Time.Span.of_sec wait in
+	let start_time = Time.now () in
 	init_ctl task
 	>>| ( fun () ->
 				let module C = (val get_ctl (): Ifc.Controlling) in
@@ -259,9 +279,20 @@ let run port task params =
 	(* use for debuging >>| (fun () -> Deferred.forever () (fun () -> after  *)
 	(* (Time.Span.create ~sec: 10 ()) >>| ping_workers ))                    *)
 	>>| (fun () -> init_workers task >>> ident )
-	>>= do_tasks "mapping" next_mapping_piece process_mapping_data
+	>>= do_tasks "mapping" next_mapping_piece process_mapping_data (Hashtbl.mem map_results)
 	>>| (fun () -> printf "\nAll Mapping sent")
-	>>= wait_finish "mapping" process_mapping_data
+	>>= wait_finish "mapping" process_mapping_data (Hashtbl.mem map_results) wait_for_task
+	>>| (fun () ->
+		printf "\nCombining results from mapping";
+		let module C = (val get_ctl (): Ifc.Controlling) in
+		let c = C.combine map_results in
+		Hashtbl.clear map_results;
+		c )
+	>>= (fun m ->
+		do_tasks "reducing" (next_reducing_piece m) process_reducing_data (Hashtbl.mem reduce_results) () )
+	>>= wait_finish "reducing" process_reducing_data (Hashtbl.mem reduce_results) wait_for_task
+	>>| (fun () -> printf "\nDONE in %s" (Time.Span.to_string (Time.diff  (Time.now ()) start_time )) 
+		)
 
 let sexp_arg = Command.Spec.Arg_type.create
 		(fun s -> (Sexp.of_string s))
@@ -275,7 +306,8 @@ let cmd =
 					~doc: " Port to listen on (default 8765)")
 			+> (flag "-task" (required string) ~doc: "path to directory with task plugins")
 			+> (flag "-params" (optional sexp_arg) ~doc:"task initilazition params (as s expression)")
+			+> (flag "-wait" (optional_with_default 5.0 float) ~doc:"time to wait for task - should be average task duration")
 		)
-		(fun port task params () -> run port task params)
+		run
 
 let () = Command.run ~version: "0.1" cmd

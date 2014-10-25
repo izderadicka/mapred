@@ -15,8 +15,12 @@ let write_response w resp =
 	Writer.flushed w
 	
 let mapper () = 
- let module M = (val get_mapper():Ifc.Mapping) in
+ let module M = (val get_mapper ():Ifc.Mapping) in
    (module Fce.Mapper(M): Fce.IMapper)
+	
+let reducer () = 
+let module R = (val get_reducer (): Ifc.Reducing) in
+ (module Fce.Reducer(R) : Fce.IReducer)
 	
 let start_server port =
 	Tcp.Server.create
@@ -49,6 +53,18 @@ let start_server port =
 														with
 														| e -> write_response w (Response.Error (Exn.to_string e))
 													end
+											 | Reduce (key, data) ->
+												begin
+													printf "\nRequest for reducing for key %s om %d" key port;
+													let module R = (val reducer() : IReducer) in
+													try
+														let res = R.reduce key data
+														in 
+														write_response w (Response.Reduce (key, res))
+													with
+														| e -> write_response w (Response.Error (Exn.to_string e))
+													end
+														
 											| _ -> failwith "Not Implemented"
 											
 										end
