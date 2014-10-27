@@ -33,29 +33,31 @@ let start port () =
 									Host_and_port.create ~host: (Host_and_port.host addr)
 										~port: p
 								in
-								(match Worker_announce.t_of_sexp s with
-									| Live p ->
-											let worker_addr = create_addr p
-											in
-											(printf "\nWorker live %s"
-													(Host_and_port.to_string worker_addr);
-												ignore
-													(Hashtbl.add available_workers ~key: worker_addr
-															~data:
-															{
-																address = worker_addr;
-																last_active = Time.now ();
-																status = Ready;
-															});
-												ignore (Pipe.write free_workers_writer worker_addr);
-												return ())
-									| Died p ->
-											let worker_addr = create_addr p
-											in
-											(printf "\nWorker down %s"
-													(Host_and_port.to_string worker_addr);
-												Hashtbl.remove available_workers worker_addr;
-												return ()))))
+								let open Worker_announce in
+								match t_of_sexp s with
+								| Live p ->
+										let worker_addr = create_addr p
+										in
+										(printf "\nWorker live %s"
+												(Host_and_port.to_string worker_addr);
+											ignore
+												(Hashtbl.add available_workers ~key: worker_addr
+														~data:
+														{
+															address = worker_addr;
+															last_active = Time.now ();
+															status = Ready;
+														});
+											ignore (Pipe.write free_workers_writer worker_addr);
+											return ())
+								| Died p ->
+										let worker_addr = create_addr p
+										in
+										(printf "\nWorker down %s"
+												(Host_and_port.to_string worker_addr);
+											Hashtbl.remove available_workers worker_addr;
+											return ())
+					))
 
 let req_resp ?on_error worker_addr req process_resp =
 	try_with
@@ -82,8 +84,8 @@ let req_resp ?on_error worker_addr req process_resp =
 
 let req_resp_no_wait ?on_error worker_addr req process_resp =
 	match on_error with
-	| Some s -> Deferred.don't_wait_for (req_resp ~on_error: s worker_addr req process_resp)
-	| None -> Deferred.don't_wait_for (req_resp worker_addr req process_resp)
+	| Some s -> don't_wait_for (req_resp ~on_error: s worker_addr req process_resp)
+	| None -> don't_wait_for (req_resp worker_addr req process_resp)
 
 let ping_workers () =
 	
@@ -95,9 +97,10 @@ let ping_workers () =
 									printf "\nWorker %s  died - error  %s"
 										(Host_and_port.to_string key) (Exn.to_string e);
 									Hashtbl.remove available_workers key)
-						key Request.Ping (fun se ->
+						key
+						Request.Ping (fun se ->
 									(match se with
-										| Pong p ->
+										| Response.Pong p ->
 												assert (p = (Host_and_port.port key));
 												(printf "\nWorker %s  pong "
 														(Host_and_port.to_string key);
@@ -125,7 +128,7 @@ let rec init_workers worker_param =
 					(Request.Init worker_param)
 					( fun resp ->
 								match resp with
-								| Ready ->
+								| Response.Ready ->
 										printf "\nMapper %s is ready" (Host_and_port.to_string w);
 										if update_worker_status w Initialized then
 											ignore (Pipe.write ready_workers_writer w)
@@ -136,11 +139,9 @@ let rec init_workers worker_param =
 		| `Eof -> return ()
 	)
 
-
-
 let max_retries = ref 3
 
-let do_task ?(attempt =0) name piece process_data got_result=
+let do_task ?(attempt =0) name piece process_data got_result =
 	let send req worker =
 		match worker with
 		| `Ok w ->
@@ -177,15 +178,14 @@ let do_task ?(attempt =0) name piece process_data got_result=
 							w
 							req
 							( fun resp ->
-								
 										match resp with
-										| Map _ | Reduce _ ->
+										| Response.Map _ | Response.Reduce _ ->
 										
 												return_worker ();
 												let key = process_data resp in
 												remove_sent key;
 										
-										| Error msg ->
+										| Response.Error msg ->
 												printf "\nError in remote task for piece %s:\n%s" k msg;
 												return_worker ();
 										
@@ -198,13 +198,13 @@ let do_task ?(attempt =0) name piece process_data got_result=
 	Pipe.read ready_workers_reader >>| send piece
 
 let rec do_tasks name next_piece process_data got_result () =
-	match next_piece () with
-	| Some p -> do_task name p process_data  got_result>>= do_tasks name next_piece process_data got_result
+	next_piece () >>= function
+	| Some p -> do_task name p process_data got_result >>= do_tasks name next_piece process_data got_result
 	| None -> printf "\nNo more pieces to read"; return ()
 
 let next_mapping_piece () =
 	let module C = (val (get_ctl ()): Ifc.Controlling) in
-	match C.next_piece () with
+	C.next_piece () >>| function
 	| Some (k, v) -> Some (Request.Map (k, v))
 	| None -> None
 
@@ -215,25 +215,20 @@ let process_mapping_data resp =
 				ignore (Hashtbl.add map_results ~key ~data);
 			key
 	| _ -> assert false
-	
-	
+
 let next_reducing_piece l =
 	let data = ref l in
-	let  next () = 
-	match !data with 
-	|[] -> None
-	|(k,d)::tl ->  data:= tl; Some (Request.Reduce (k,d))
+	let next () =
+		match !data with
+		|[] -> return None
+		| (k, d):: tl -> data:= tl; return (Some (Request.Reduce (k, d)))
 	in next
-	
+
 let process_reducing_data resp =
-	match resp with 
-	| Response.Reduce (key,data)  ->
-		ignore (Hashtbl.add reduce_results ~key ~data);
-		let module C = (val get_ctl () : Ifc.Controlling) in
-		C.process_result (key,data); key
+	match resp with
+	| Response.Reduce (key, data) ->
+			ignore (Hashtbl.add reduce_results ~key ~data); key
 	| _ -> assert false
-
-
 
 let rec wait_finish for_name process_result got_result wait_for_task () =
 	match String.Hash_queue.first sent_pieces with
@@ -243,8 +238,8 @@ let rec wait_finish for_name process_result got_result wait_for_task () =
 				match String.Hash_queue.dequeue sent_pieces with
 				| Some (resent, sent_time, att) ->
 						let key = match resent with
-							| Map (k, _) -> k
-							| Reduce(k, _) -> k
+							| Request.Map (k, _) -> k
+							| Request.Reduce(k, _) -> k
 							| _ -> assert false
 						in
 						if att >= !max_retries then
@@ -263,36 +258,50 @@ let rec wait_finish for_name process_result got_result wait_for_task () =
 
 let init_ctl path =
 	let fname = Filename.concat path "ctl.cmo" in
-	Plugin.load fname	
-	>>| (fun () ->		printf "\nPlugin form file %s loaded" fname)
+	Plugin.load fname
+	>>| (fun () -> printf "\nPlugin form file %s loaded" fname)
 
+let combine res =
+	printf "\nCombining results";
+	let tbl = String.Table.create () in
+	let rec add l =
+		match l with
+		| (key, v):: t -> ( match Hashtbl.find tbl key with
+					| Some ev -> Hashtbl.replace tbl ~key ~data: (v :: ev); add t
+					| None -> ignore (Hashtbl.add tbl ~key ~data:[v]) ; add t
+				)
+		|[] -> ()
+	
+	in Hashtbl.iter res ~f: (fun ~key ~data -> ignore key; add data);
+	Hashtbl.to_alist tbl
 
-let run port task params wait ()=
+let run port task params wait () =
 	let wait_for_task = Time.Span.of_sec wait in
 	let start_time = Time.now () in
 	init_ctl task
-	>>| ( fun () ->
+	>>= ( fun () ->
 				let module C = (val get_ctl (): Ifc.Controlling) in
 				C.init params )
 	>>= start port
 	>>| (fun _s -> printf "\nController is running on port %d" port)
 	(* use for debuging >>| (fun () -> Deferred.forever () (fun () -> after  *)
 	(* (Time.Span.create ~sec: 10 ()) >>| ping_workers ))                    *)
-	>>| (fun () -> init_workers task >>> ident )
+	>>| (fun () -> don't_wait_for (init_workers task ))
 	>>= do_tasks "mapping" next_mapping_piece process_mapping_data (Hashtbl.mem map_results)
 	>>| (fun () -> printf "\nAll Mapping sent")
 	>>= wait_finish "mapping" process_mapping_data (Hashtbl.mem map_results) wait_for_task
 	>>| (fun () ->
-		printf "\nCombining results from mapping";
-		let module C = (val get_ctl (): Ifc.Controlling) in
-		let c = C.combine map_results in
-		Hashtbl.clear map_results;
-		c )
+				printf "\nCombining results from mapping";
+				let c = combine map_results in
+				Hashtbl.clear map_results;
+				c )
 	>>= (fun m ->
-		do_tasks "reducing" (next_reducing_piece m) process_reducing_data (Hashtbl.mem reduce_results) () )
+				do_tasks "reducing" (next_reducing_piece m) process_reducing_data (Hashtbl.mem reduce_results) () )
 	>>= wait_finish "reducing" process_reducing_data (Hashtbl.mem reduce_results) wait_for_task
-	>>| (fun () -> printf "\nDONE in %s" (Time.Span.to_string (Time.diff  (Time.now ()) start_time )) 
-		)
+	>>| (fun () -> let module C = (val get_ctl () : Ifc.Controlling) in
+				C.process_result reduce_results )
+	>>| (fun () -> printf "\nDONE in %s" (Time.Span.to_string (Time.diff (Time.now ()) start_time ))
+	)
 
 let sexp_arg = Command.Spec.Arg_type.create
 		(fun s -> (Sexp.of_string s))

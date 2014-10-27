@@ -61,5 +61,6 @@ end
 
 let () =
 	Random.self_init ();
+	printf "\nPluging dummy init";
 	set_mapper (module M: Ifc.Mapping);
 	set_reducer (module R: Ifc.Reducing)

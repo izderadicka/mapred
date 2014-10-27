@@ -5,8 +5,14 @@ if [ -e $NO ]
 then
 NO=10
 fi
+
+EXT=$2
+if [ -e $EXT] ; then 
+EXT=byte
+fi
+
 for ((i=$START;i<$START+$NO;++i)) 
 do 
-./worker.byte -port $i &
+./worker.$EXT -port $i &
 echo "Started $i"
 done

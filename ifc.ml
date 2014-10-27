@@ -1,19 +1,16 @@
 open Protocol
 open Core.Std
+open Async.Std
 
 module type Controlling =
 	sig
 		
-val init: Sexp.t option-> unit
+val init: Sexp.t option-> unit Deferred.t
 (** gets one key to be mapped, None if there are no more input data *)
-val next_piece: unit -> (string * Data.t) option
+val next_piece: unit -> (string * Data.t) option Deferred.t
 
-(** combines all results from mapping phase, collects together by same key *)
-val combine : (string ,(string * Data.t) list) Hashtbl.t -> (string * (Data.t list)) list
-
-(** process results from reduce task *)
-
-val process_result : (string * Data.t) -> unit
+(* (** process results from reduce task *) *)
+val process_result : (string, Data.t) Hashtbl.t -> unit
 
 end
 

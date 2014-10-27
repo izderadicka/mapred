@@ -20,38 +20,23 @@ module M : Ifc.Controlling =
 let init s =
 	match s with 
 	|Some s -> let count = Int.t_of_sexp s in
-	   vals := (range count)
-	|None -> ()
+	   vals := (range count);
+		return ()
+	|None -> return ()
 	
 let next_piece () = 
 match !vals with 
 | hd::tl -> vals := tl; 
 printf "\nReading piece %d" hd;
-Some (Int.to_string hd, Data.S (Int.to_string hd))
-| [] -> None
+return (Some (Int.to_string hd, Data.S (Int.to_string hd)))
+| [] -> return None
 
-
-
-
-let combine res = 
- printf "\nCombining results";
- let tbl = String.Table.create () in
- let rec add l =
-	match l with 
-	| (key,v)::t ->  ( match Hashtbl.find tbl key with
-		| Some ev -> Hashtbl.replace tbl ~key ~data: (v :: ev); add t
-		| None -> ignore (Hashtbl.add tbl ~key ~data:[v]) ; add t
-		)
-	|[] -> ()
- 
-	in Hashtbl.iter res ~f: (fun ~key ~data -> ignore key; add data);
-	Hashtbl.to_alist tbl	
-
-let process_result (key, res)  = 
-let res =  match res with
+let process_result (tbl)  = 
+Hashtbl.iter tbl ~f: (fun ~key ~data ->
+let res =  match data with
 	| Data.S s -> s
 	| (Data.File {path;_}) -> sprintf "File:%s" path
-	in printf "\nResult for %s is %s" key res
+	in printf "\nResult for %s is %s" key res)
 
 end
 

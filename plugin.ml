@@ -1,7 +1,9 @@
+let hard_exit=exit
 open Core.Std
 open Async.Std
 
 let load fname =
+
 	let fname = Dynlink.adapt_filename fname in
 	Sys.file_exists fname
 	>>| function
@@ -11,7 +13,8 @@ let load fname =
 					Dynlink.loadfile fname
 				with
 				
-				| (Dynlink.Error err) -> printf "\nERROR loading plugin: %s" (Dynlink.error_message err) ; ignore (exit 1)
+				| (Dynlink.Error err) -> let msg = sprintf "\nERROR loading plugin: %s" (Dynlink.error_message err) in 
+				failwith msg
 				| _ -> failwith "Unknow error while loading plugin"
 			end
 	| _ ->
